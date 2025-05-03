@@ -3,21 +3,24 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from spikingjelly.activation_based import neuron, encoding, functional, layer
+from spikingjelly.activation_based import neuron, encoding, functional, layer, monitor
+#from spikingjelly.activation_based.learning import STDP
 import os
 import matplotlib.pyplot as plt
 import csv
 from pathlib import Path
+import pandas as pd
 
 # ==== CONFIGURATION ====
 BATCH_SIZE = 64
 EPOCHS = 5
-TIME_STEPS = 10
+# TIME_STEPS = 10
 LEARNING_RATE = 1e-3
 QUANTIZE_WEIGHTS = True
-QUANT_BITS = 3  # Choose from: 2, 3, 4, 5
+# QUANT_BITS = 3  # Choose from: 2, 3, 4, 5
+TRAINING_MODE = "supervised"  # options: "supervised" -- Surrogate Gradient Descent, "unsupervised" -- STDP
 
-IMG_SIZE = [28, 14, 7, 4]
+# IMG_SIZE = [28, 14, 7, 4]
 HIDDEN_NEURONS = 512
 OUTPUT_NEURONS = 10
 
@@ -38,21 +41,28 @@ class PoissonEncoder(torch.nn.Module):
 class SNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = layer.Linear(IMG_SIZE*IMG_SIZE, HIDDEN_NEURONS)
+        self.fc1 = layer.Linear(IMG_SIZE * IMG_SIZE, HIDDEN_NEURONS)
         self.neuron1 = neuron.IFNode()
-        self.fc2 = layer.Linear(HIDDEN_NEURONS, OUTPUT_NEURONS) # 512 neuron layers, 10 output layers
+        self.fc2 = layer.Linear(HIDDEN_NEURONS, OUTPUT_NEURONS)
         self.neuron2 = neuron.IFNode()
 
+        # Add monitors
+        self.mon1 = monitor.OutputMonitor(self.neuron1)
+        self.mon2 = monitor.OutputMonitor(self.neuron2)
+
     def forward(self, x_spike):
-        mem_rec = []
+        self.mon1 = monitor.OutputMonitor(self.neuron1)
+        self.mon2 = monitor.OutputMonitor(self.neuron2)
+
         for t in range(x_spike.shape[0]):
-            x = x_spike[t].view(x_spike.size(1), -1)  # Flatten: [B, 28*28]
+            x = x_spike[t].view(x_spike.size(1), -1)
             x = self.fc1(x)
             x = self.neuron1(x)
             x = self.fc2(x)
             x = self.neuron2(x)
-            mem_rec.append(x)
-        return torch.stack(mem_rec).mean(0)
+        return x
+
+
 
 # ==== WEIGHT QUANTIZATION ==== 
 def quantize_model_weights(model, num_bits):
@@ -80,6 +90,68 @@ def calculate_accuracy(model, data_loader, encoder):
         total += labels.size(0)
         functional.reset_net(model)
     return 100 * correct / total
+
+# ==== STDP Training ====
+# def train_with_stdp(model, train_loader, encoder):
+#     # Only for one epoch (unsupervised loop)
+#     model.train()
+    
+#     # Wrap layers with STDP
+#     stdp_fc1 = STDP(model.fc1, model.neuron1, f_pre=1.0, f_post=-1.0)
+#     stdp_fc2 = STDP(model.fc2, model.neuron2, f_pre=1.0, f_post=-1.0)
+
+#     for images, _ in train_loader:  # no labels used
+#         images = images.to(DEVICE)
+#         spike_input = encoder(images.float()).float()
+        
+#         for t in range(TIME_STEPS):
+#             x_t = spike_input[t].view(spike_input.size(1), -1)
+#             out1 = model.fc1(x_t)
+#             out1 = model.neuron1(out1)
+#             out2 = model.fc2(out1)
+#             out2 = model.neuron2(out2)
+
+#             stdp_fc1.step(x_t, out1)
+#             stdp_fc2.step(out1, out2)
+
+#         functional.reset_net(model)
+
+# ==== Raster Plots ====
+def plot_spike_raster_manual(spike_tensor, save_path, title):
+    """
+    Custom raster plotter for [time_steps, neurons] spike tensor.
+    Saves directly to PNG (no display).
+    """
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    spike_array = spike_tensor.cpu().numpy()
+    t_idxs, n_idxs = spike_array.nonzero()  # Find all (time, neuron) spike pairs
+
+    plt.figure(figsize=(8, 4))
+    plt.scatter(t_idxs, n_idxs, s=2, c='black')
+    plt.xlabel("Time step")
+    plt.ylabel("Neuron index")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+# ==== Export Raster Data ====
+def export_spike_raster_to_csv(spike_tensor, csv_path):
+    """
+    Exports spike raster (time_steps x neurons) to a CSV file.
+    Each row contains the time step and neuron index for a spike.
+    """
+    spike_array = spike_tensor.cpu().numpy()
+    rows = []
+    for t in range(spike_array.shape[0]):
+        for n in range(spike_array.shape[1]):
+            if spike_array[t, n]:  # Spike occurred
+                rows.append({"time_step": t, "neuron_index": n})
+
+    df = pd.DataFrame(rows)
+    df.to_csv(csv_path, index=False)
+    print(f"Saved spike raster to {csv_path}")
+
 
 # ==== MAIN FUNCTION ====
 def main():
@@ -113,19 +185,27 @@ def main():
 
             # Training
             for epoch in range(EPOCHS):
-                model.train()
-                running_loss = 0.0
-                for images, labels in train_loader:
-                    images = images.to(DEVICE)
-                    labels = labels.to(DEVICE)
-                    spike_input = encoder(images.float()).float()
-                    outputs = model(spike_input)
-                    loss = criterion(outputs, labels)
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
-                    functional.reset_net(model)
-                    running_loss += loss.item()
+                print(f"Epoch {epoch+1}/{EPOCHS}")
+                
+                if TRAINING_MODE == "supervised":
+                    model.train()
+                    running_loss = 0.0
+                    for images, labels in train_loader:
+                        images = images.to(DEVICE)
+                        labels = labels.to(DEVICE)
+                        spike_input = encoder(images.float()).float()
+                        outputs = model(spike_input)
+                        loss = criterion(outputs, labels)
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                        functional.reset_net(model)
+                        running_loss += loss.item()
+                    print(f"  Loss: {running_loss:.4f}")
+
+                elif TRAINING_MODE == "unsupervised":
+                    #train_with_stdp(model, train_loader, encoder)
+                    print("  STDP update complete.")
 
                 train_acc = calculate_accuracy(model, train_loader, encoder)
                 test_acc = calculate_accuracy(model, test_loader, encoder)
@@ -151,6 +231,44 @@ def main():
                         })
 
             print(f"=== Done: IMG {img_size} | TIME_STEPS {time_steps} ===\n")
+
+            # === EXPORT SPIKE RASTERS AND CSV FOR MULTIPLE DIGITS ===
+            model.eval()
+            example_digits = [0, 6, 8]
+
+            for digit in example_digits:
+                sample_idx = next(i for i, (_, y) in enumerate(test_dataset) if y == digit)
+                image, label = test_dataset[sample_idx]
+                image = image.unsqueeze(0).to(DEVICE)
+                spike_input = encoder(image).float()
+
+                # Save input spike raster
+                input_spike_record = spike_input.squeeze(1).view(TIME_STEPS, -1)  # Flatten input to [T, N]
+                plot_spike_raster_manual(
+                    title=f"Input layer spikes - Digit {digit}",
+                    spike_record=input_spike_record,
+                    save_path=f"plots/input_spikes_digit_{digit}.png"
+                )
+
+                _ = model(spike_input)
+
+                # Save hidden and output spike rasters
+                plot_spike_raster_manual(
+                    title=f"Hidden layer spikes - Digit {digit}",
+                    spike_record=model.mon1.records[0],
+                    save_path=f"plots/hidden_spikes_digit_{digit}.png"
+                )
+                plot_spike_raster_manual(
+                    title=f"Output layer spikes - Digit {digit}",
+                    spike_record=model.mon2.records[0],
+                    save_path=f"plots/output_spikes_digit_{digit}.png"
+                )
+
+                # Save output spike raster to CSV
+                export_spike_raster_to_csv(
+                    model.mon2.records[0],
+                    csv_path=f"plots/output_spike_raster_digit_{digit}.csv"
+                )
 
 if __name__ == '__main__':
     main()
