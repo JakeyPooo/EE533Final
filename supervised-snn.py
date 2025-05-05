@@ -97,9 +97,9 @@ class PreEncodedPoissonDataset(torch.utils.data.Dataset):
 
 # ==== MAIN FUNCTION ====
 def main():
-    image_sizes = [4, 7, 14, 28]
+    image_sizes = [28]#[4, 7, 14, 28]
     quant_bits_list = [2, 3, 4, 5]
-    time_step_list = [5, 10, 20]
+    time_step_list = [20]#[5, 10, 20]
 
     for img_size in image_sizes:
         for time_steps in time_step_list:
@@ -186,17 +186,18 @@ if __name__ == '__main__':
 # ==== RASTER PLOT SECTION ====
 import numpy as np
 
-
-def plot_raster(spike_record, title, save_path):
+def plot_raster(spike_record, title, save_path, time_step_ms=0.1):
     plt.figure(figsize=(10, 4))
     raster_data = []
+    spike_flags = []
+
     for t in range(spike_record.shape[0]):
         fired = spike_record[t].nonzero(as_tuple=True)[0]
-        if len(fired) == 0:
-            continue
+        spike_flags.append(1 if len(fired) > 0 else 0)  # 1 if any neuron spikes
         for i in fired:
-            raster_data.append((t * 1e-6, int(i)))
+            raster_data.append((t, int(i)))
         plt.scatter([t] * len(fired), fired, s=2)
+
     plt.title(title)
     plt.xlabel("Time (step)")
     plt.ylabel("Neuron Index")
@@ -205,12 +206,10 @@ def plot_raster(spike_record, title, save_path):
     plt.savefig(save_path)
     plt.close()
 
-    # Save to .txt in time (s) format
+    # === Save to .txt with cadence-friendly format ===
     with open(save_path.replace('.png', '.txt'), 'w') as f:
-        for t, i in raster_data:
-            f.write(f"{t:.1e}\t{i}\n")
-
-
+        for t, flag in enumerate(spike_flags):
+            f.write(f"{t * 1e-6:.1e}\t{flag}\n")
 
 # Use final trained model with IMG_SIZE=28, TIME_STEPS=20
 IMG_SIZE = 28
