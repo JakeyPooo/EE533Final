@@ -12,13 +12,9 @@ from pathlib import Path
 # ==== CONFIGURATION ====
 BATCH_SIZE = 64
 EPOCHS = 5
-TIME_STEPS = 10
 LEARNING_RATE = 1e-3
-QUANTIZE_WEIGHTS = True
-QUANT_BITS = 3  # Choose from: 2, 3, 4, 5
-
-IMG_SIZE = [28, 14, 7, 4]
-HIDDEN_NEURONS = 512
+QUANTIZE_WEIGHTS=True
+HIDDEN_NEURONS = 5
 OUTPUT_NEURONS = 10
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -38,21 +34,32 @@ class PoissonEncoder(torch.nn.Module):
 class SNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = layer.Linear(IMG_SIZE*IMG_SIZE, HIDDEN_NEURONS)
+        self.fc1 = layer.Linear(IMG_SIZE*IMG_SIZE, OUTPUT_NEURONS)
         self.neuron1 = neuron.IFNode()
-        self.fc2 = layer.Linear(HIDDEN_NEURONS, OUTPUT_NEURONS) # 512 neuron layers, 10 output layers
-        self.neuron2 = neuron.IFNode()
+        # self.fc1 = layer.Linear(IMG_SIZE*IMG_SIZE, HIDDEN_NEURONS)
+        # self.neuron1 = neuron.IFNode()
+        # self.fc2 = layer.Linear(HIDDEN_NEURONS, OUTPUT_NEURONS) # 512 neuron layers, 10 output layers
+        # self.neuron2 = neuron.IFNode()
 
     def forward(self, x_spike):
-        mem_rec = []
+        out = 0
         for t in range(x_spike.shape[0]):
-            x = x_spike[t].view(x_spike.size(1), -1)  # Flatten: [B, 28*28]
+            x = x_spike[t].view(x_spike.size(1), -1)
             x = self.fc1(x)
             x = self.neuron1(x)
-            x = self.fc2(x)
-            x = self.neuron2(x)
-            mem_rec.append(x)
-        return torch.stack(mem_rec).mean(0)
+            out += x
+        return out / x_spike.shape[0]
+
+    # def forward(self, x_spike):
+    #     mem_rec = []
+    #     for t in range(x_spike.shape[0]):
+    #         x = x_spike[t].view(x_spike.size(1), -1)  # Flatten: [B, 28*28]
+    #         x = self.fc1(x)
+    #         x = self.neuron1(x)
+    #         x = self.fc2(x)
+    #         x = self.neuron2(x)
+    #         mem_rec.append(x)
+    #     return torch.stack(mem_rec).mean(0)
 
 # ==== WEIGHT QUANTIZATION ==== 
 def quantize_model_weights(model, num_bits):
@@ -178,6 +185,91 @@ def main():
                         })
 
             print(f"=== Done: IMG {img_size} | TIME_STEPS {time_steps} ===\n")
+            torch.save(model.state_dict(), "trained_supervised_snn.pt")  # Save trained model after last loop
+
 
 if __name__ == '__main__':
     main()
+
+
+
+# ==== RASTER PLOT SECTION ====
+import numpy as np
+
+
+def plot_raster(spike_record, title, save_path):
+    plt.figure(figsize=(10, 4))
+    raster_data = []
+    for t in range(spike_record.shape[0]):
+        fired = spike_record[t].nonzero(as_tuple=True)[0]
+        if len(fired) == 0:
+            continue
+        for i in fired:
+            raster_data.append((t * 1e-6, int(i)))
+        plt.scatter([t] * len(fired), fired, s=2)
+    plt.title(title)
+    plt.xlabel("Time (step)")
+    plt.ylabel("Neuron Index")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+    # Save to .txt in time (s) format
+    with open(save_path.replace('.png', '.txt'), 'w') as f:
+        for t, i in raster_data:
+            f.write(f"{t:.1e}\t{i}\n")
+
+
+
+# Use final trained model with IMG_SIZE=28, TIME_STEPS=20
+IMG_SIZE = 28
+TIME_STEPS = 20
+transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor()
+])
+test_dataset_full = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+encoder = PoissonEncoder(time_steps=TIME_STEPS)
+model = SNN().to(DEVICE)
+model.load_state_dict(torch.load("trained_supervised_snn.pt", weights_only=True))  # assumes you save the trained model
+model.eval()
+
+# Collect samples for digits [0, 6, 8]
+target_digits = [0, 6, 8]
+samples = {d: None for d in target_digits}
+for img, label in test_dataset_full:
+    if label in target_digits and samples[label] is None:
+        samples[label] = (img.unsqueeze(0).to(DEVICE), label)
+    if all(v is not None for v in samples.values()):
+        break
+
+# Redefine SNN with spike logging
+class SNNWithSpikes(SNN):
+    def forward(self, x_spike):
+        input_spikes = []
+        hidden_spikes = []
+        output_spikes = []
+        for t in range(x_spike.shape[0]):
+            x = x_spike[t].view(x_spike.size(1), -1)
+            input_spikes.append(x.clone().detach().cpu())
+            x = self.fc1(x)
+            x = self.neuron1(x)
+            hidden_spikes.append(x.clone().detach().cpu())
+            x = self.fc2(x)
+            x = self.neuron2(x)
+            output_spikes.append(x.clone().detach().cpu())
+        return torch.stack(input_spikes), torch.stack(hidden_spikes), torch.stack(output_spikes)
+
+model_spike = SNNWithSpikes().to(DEVICE)
+model_spike.load_state_dict(model.state_dict())
+
+# Generate raster plots
+for digit, (img, lbl) in samples.items():
+    spikes = encoder(img).float().to(DEVICE)  # [T, B, C, H, W]
+    spikes = spikes.view(TIME_STEPS, 1, -1)   # flatten
+    in_spk, hid_spk, out_spk = model_spike(spikes)
+
+    plot_raster(in_spk.squeeze().T, f"Input Spikes - Digit {digit}", f"raster_input_{digit}.png")
+    plot_raster(hid_spk.squeeze().T, f"Hidden Spikes - Digit {digit}", f"raster_hidden_{digit}.png")
+    plot_raster(out_spk.squeeze().T, f"Output Spikes - Digit {digit}", f"raster_output_{digit}.png")

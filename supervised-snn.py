@@ -15,7 +15,7 @@ EPOCHS = 5
 TIME_STEPS = 10
 LEARNING_RATE = 1e-3
 QUANTIZE_WEIGHTS=True
-HIDDEN_NEURONS = 512
+HIDDEN_NEURONS = 5
 OUTPUT_NEURONS = 10
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -97,9 +97,9 @@ class PreEncodedPoissonDataset(torch.utils.data.Dataset):
 
 # ==== MAIN FUNCTION ====
 def main():
-    image_sizes = [28] #[4, 7, 14, 28]
+    image_sizes = [4, 7, 14, 28]
     quant_bits_list = [2, 3, 4, 5]
-    time_step_list = [20] #[5, 10, 20]
+    time_step_list = [5, 10, 20]
 
     for img_size in image_sizes:
         for time_steps in time_step_list:
