@@ -108,6 +108,9 @@ def plot_weight_histogram(model, bits, save_path):
     print(f"Saved weight histogram: {save_path}")
 
 def save_output_spike_txt(output_spike_tensor, digit, save_dir="./plots", time_step_us=0.1):
+    """
+    Writes spike output to file with 3 zero steps inserted after every timestep to simulate 100ms reset window.
+    """
     output_spike_tensor = output_spike_tensor.cpu().numpy()
     flags = (output_spike_tensor.sum(axis=0) > 0).astype(int)
 
@@ -116,7 +119,11 @@ def save_output_spike_txt(output_spike_tensor, digit, save_dir="./plots", time_s
 
     with open(file_path, 'w') as f:
         for t, flag in enumerate(flags):
-            f.write(f"{t * time_step_us:.1f}\t{flag}\n")
+            base_time = t * time_step_us
+            f.write(f"{base_time:.1f}\t{flag}\n")
+            # Add 3 zero steps at +0.1, +0.2, +0.3 us from base_time
+            for i in range(1, 4):
+                f.write(f"{base_time + i * time_step_us:.1f}\t0\n")
 
     print(f"Saved output spike .txt for digit {digit} → {file_path}")
 
@@ -264,7 +271,7 @@ model = SNN().to(DEVICE)
 model.load_state_dict(torch.load("trained_supervised_snn_smaller.pt", map_location=DEVICE))
 model.eval()
 
-target_digits = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # changes how many digits are ran
+target_digits = [0, 6, 8] # changes how many digits are ran
 samples = {d: None for d in target_digits}
 for img, label in test_dataset_full:
     if label in target_digits and samples[label] is None:
