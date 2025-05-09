@@ -11,12 +11,11 @@ from pathlib import Path
 import numpy as np
 import matplotlib.cm as cm
 
-
 # ==== CONFIGURATION ====
 BATCH_SIZE = 64
 EPOCHS = 5
 LEARNING_RATE = 1e-3
-QUANTIZE_WEIGHTS=True
+QUANTIZE_WEIGHTS = True
 HIDDEN_NEURONS = 5
 OUTPUT_NEURONS = 10
 
@@ -29,20 +28,14 @@ class PoissonEncoder(torch.nn.Module):
         self.time_steps = time_steps
 
     def forward(self, x):
-        # Input shape: [batch, channels, height, width]
-        # Output shape: [time_steps, batch, channels, height, width]
         return torch.rand((self.time_steps,) + x.shape, device=x.device) < x
 
 # ==== SNN DEFINITION ====
 class SNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = layer.Linear(IMG_SIZE*IMG_SIZE, OUTPUT_NEURONS)
+        self.fc1 = layer.Linear(IMG_SIZE * IMG_SIZE, OUTPUT_NEURONS)
         self.neuron1 = neuron.IFNode()
-        # self.fc1 = layer.Linear(IMG_SIZE*IMG_SIZE, HIDDEN_NEURONS)
-        # self.neuron1 = neuron.IFNode()
-        # self.fc2 = layer.Linear(HIDDEN_NEURONS, OUTPUT_NEURONS) # 512 neuron layers, 10 output layers
-        # self.neuron2 = neuron.IFNode()
 
     def forward(self, x_spike):
         out = 0
@@ -53,18 +46,7 @@ class SNN(nn.Module):
             out += x
         return out / x_spike.shape[0]
 
-    # def forward(self, x_spike):
-    #     mem_rec = []
-    #     for t in range(x_spike.shape[0]):
-    #         x = x_spike[t].view(x_spike.size(1), -1)  # Flatten: [B, 28*28]
-    #         x = self.fc1(x)
-    #         x = self.neuron1(x)
-    #         x = self.fc2(x)
-    #         x = self.neuron2(x)
-    #         mem_rec.append(x)
-    #     return torch.stack(mem_rec).mean(0)
-
-# ==== WEIGHT QUANTIZATION ==== 
+# ==== WEIGHT QUANTIZATION ====
 def quantize_model_weights(model, num_bits):
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -83,7 +65,7 @@ def calculate_accuracy(model, data_loader, encoder):
     for images, labels in data_loader:
         images = images.to(DEVICE)
         labels = labels.to(DEVICE)
-        spike_input = images.permute(1, 0, 2, 3, 4)  # [B, T, C, H, W] → [T, B, C, H, W]
+        spike_input = images.permute(1, 0, 2, 3, 4)
         outputs = model(spike_input)
         _, predicted = outputs.max(1)
         correct += (predicted == labels).sum().item()
@@ -95,10 +77,10 @@ class PreEncodedPoissonDataset(torch.utils.data.Dataset):
     def __init__(self, base_dataset, encoder):
         self.encoded_data = []
         for image, label in base_dataset:
-            image = image.unsqueeze(0)  # [1, H, W]
-            spikes = encoder(image).float()  # [T, 1, 1, H, W]
+            image = image.unsqueeze(0)
+            spikes = encoder(image).float()
             if spikes.shape[2] == 1:
-                spikes = spikes.squeeze(2)  # Remove channel dim if present
+                spikes = spikes.squeeze(2)
                 self.encoded_data.append((spikes, label))
 
     def __len__(self):
@@ -106,15 +88,6 @@ class PreEncodedPoissonDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         return self.encoded_data[idx]
-
-def quantize_model_weights(model, num_bits):
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if 'weight' in name:
-                w_min = param.min()
-                w_max = param.max()
-                delta = (w_max - w_min) / (2 ** num_bits - 1)
-                param.copy_(torch.round((param - w_min) / delta) * delta + w_min)
 
 def plot_weight_histogram(model, bits, save_path):
     all_weights = []
@@ -133,6 +106,19 @@ def plot_weight_histogram(model, bits, save_path):
     plt.savefig(save_path)
     plt.close()
     print(f"Saved weight histogram: {save_path}")
+
+def save_output_spike_txt(output_spike_tensor, digit, save_dir="./plots", time_step_us=0.1):
+    output_spike_tensor = output_spike_tensor.cpu().numpy()
+    flags = (output_spike_tensor.sum(axis=0) > 0).astype(int)
+
+    os.makedirs(save_dir, exist_ok=True)
+    file_path = f"{save_dir}/output_digit{digit}.txt"
+
+    with open(file_path, 'w') as f:
+        for t, flag in enumerate(flags):
+            f.write(f"{t * time_step_us:.1f}\t{flag}\n")
+
+    print(f"Saved output spike .txt for digit {digit} → {file_path}")
 
 
 # ==== MAIN FUNCTION ====
@@ -278,7 +264,7 @@ model = SNN().to(DEVICE)
 model.load_state_dict(torch.load("trained_supervised_snn_smaller.pt", map_location=DEVICE))
 model.eval()
 
-target_digits = [0, 6, 8]
+target_digits = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] # changes how many digits are ran
 samples = {d: None for d in target_digits}
 for img, label in test_dataset_full:
     if label in target_digits and samples[label] is None:
@@ -307,12 +293,15 @@ model_spike.load_state_dict(model.state_dict())
 
 for digit, (img, lbl) in samples.items():
     spikes = encoder(img).float().to(DEVICE)  # [T, B, 1, H, W]
-    spikes_flat = spikes.view(TIME_STEPS, 1, -1)
-    in_spk, hid_spk, out_spk = model_spike(spikes_flat)  # [T, B, N]
+    spikes_flat = spikes.view(TIME_STEPS, 1, -1)  # Flatten
 
-    # Transpose to [neurons, time]
+    in_spk, hid_spk, out_spk = model_spike(spikes_flat)  # [T, B, N]
     in_spk = in_spk.squeeze(1).T
     hid_spk = hid_spk.squeeze(1).T
     out_spk = out_spk.squeeze(1).T
 
+    # Plot raster
     plot_combined_raster(in_spk, hid_spk, out_spk, digit, f"./plots/smaller_raster_digit_{digit}.png")
+
+    # Save cadence-style output flag .txt file for this digit
+    save_output_spike_txt(out_spk, digit, save_dir="./plots", time_step_us=0.1)
