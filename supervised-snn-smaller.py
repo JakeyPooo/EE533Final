@@ -107,9 +107,11 @@ def plot_weight_histogram(model, bits, save_path):
     plt.close()
     print(f"Saved weight histogram: {save_path}")
 
-def save_output_spike_txt(output_spike_tensor, digit, save_dir="./plots", time_step_us=0.1):
+def save_output_spike_txt(output_spike_tensor, digit, save_dir="./plots", step_interval_us=0.025):
     """
-    Writes spike output to file with 3 zero steps inserted after every timestep to simulate 100ms reset window.
+    For every original spike flag, expands into 4 time steps spaced by step_interval_us:
+        - first step: actual flag
+        - next 3 steps: 0
     """
     output_spike_tensor = output_spike_tensor.cpu().numpy()
     flags = (output_spike_tensor.sum(axis=0) > 0).astype(int)
@@ -119,11 +121,10 @@ def save_output_spike_txt(output_spike_tensor, digit, save_dir="./plots", time_s
 
     with open(file_path, 'w') as f:
         for t, flag in enumerate(flags):
-            base_time = t * time_step_us
-            f.write(f"{base_time:.1f}\t{flag}\n")
-            # Add 3 zero steps at +0.1, +0.2, +0.3 us from base_time
+            base_time = t * (step_interval_us * 4)
+            f.write(f"{base_time:.3f}\t{flag}\n")
             for i in range(1, 4):
-                f.write(f"{base_time + i * time_step_us:.1f}\t0\n")
+                f.write(f"{base_time + i * step_interval_us:.3f}\t0\n")
 
     print(f"Saved output spike .txt for digit {digit} → {file_path}")
 
@@ -239,7 +240,7 @@ def plot_combined_raster(input_spk, hidden_spk, output_spk, digit_label, save_pa
         spikes_by_neuron = [np.where(spike_tensor[i] > 0)[0] for i in range(spike_tensor.shape[0])]
 
         # Optional: color map by neuron index
-        colors = cm.get_cmap('viridis')(np.linspace(0, 1, len(spikes_by_neuron)))
+        colors = cm.get_cmap('viridis').__call__(np.linspace(0, 1, len(spikes_by_neuron)))
         ax.eventplot(spikes_by_neuron, colors=colors, lineoffsets=1, linelengths=0.8)
         ax.set_title(f"{title} - Digit {digit_label}")
         ax.set_ylabel("Neuron Index")
@@ -311,4 +312,4 @@ for digit, (img, lbl) in samples.items():
     plot_combined_raster(in_spk, hid_spk, out_spk, digit, f"./plots/smaller_raster_digit_{digit}.png")
 
     # Save cadence-style output flag .txt file for this digit
-    save_output_spike_txt(out_spk, digit, save_dir="./plots", time_step_us=0.1)
+    save_output_spike_txt(out_spk, digit, save_dir="./plots", step_interval_us=0.025)
